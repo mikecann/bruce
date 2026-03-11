@@ -1,15 +1,13 @@
 import { createOpencode } from "@opencode-ai/sdk"
+import { soul } from "./soul.ts"
 
 const prompt = process.argv.slice(2).join(" ")
 
 if (!prompt) {
   console.error("Usage: bun run index.ts <prompt>")
+  console.error("   or: bun run bruce <prompt>")
   process.exit(1)
 }
-
-console.log(`Starting OpenCode session...`)
-console.log(`Prompt: ${prompt}`)
-console.log("---")
 
 const { client } = await createOpencode()
 
@@ -24,29 +22,59 @@ if (!session.data) {
 }
 
 const sessionId = session.data.id
-console.log(`Session created: ${sessionId}`)
 
-// Subscribe to events in the background
+// Subscribe to events and stream output
 const events = await client.event.subscribe()
-;(async () => {
+
+let seenSessionIdle = false
+let lastText = ""
+
+const eventLoop = (async () => {
   for await (const event of events.stream) {
     if (event.type === "message.part.updated") {
-      const part = (event.properties as any)?.part
-      if (part?.type === "text" && part?.text) {
-        process.stdout.write(part.text)
+      const part = event.properties?.part
+      if (part?.type === "text" && !part?.synthetic) {
+        // Use delta if available for clean streaming, otherwise diff with last known text
+        const delta = event.properties?.delta
+        if (delta) {
+          process.stdout.write(delta)
+        } else if (part.text && part.text !== lastText) {
+          const newPortion = part.text.slice(lastText.length)
+          if (newPortion) process.stdout.write(newPortion)
+          lastText = part.text
+        }
       }
+    }
+
+    if (event.type === "session.idle") {
+      if (event.properties?.sessionID === sessionId) {
+        seenSessionIdle = true
+        break
+      }
+    }
+
+    if (event.type === "session.error" || event.type === "server.instance.disposed") {
+      break
     }
   }
 })()
 
-// Send the prompt
+// Send the prompt with Bruce's soul as the system prompt
 await client.session.prompt({
   path: { id: sessionId },
   body: {
+    system: soul,
     parts: [{ type: "text", text: prompt }],
   },
 })
 
-console.log("\n---")
-console.log("Done.")
+// Wait for the session to finish
+await eventLoop
+
+if (!seenSessionIdle) {
+  // Poll briefly if we didn't catch the idle event
+  await new Promise((resolve) => setTimeout(resolve, 500))
+}
+
+process.stdout.write("\n")
 process.exit(0)
