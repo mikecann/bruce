@@ -141,6 +141,22 @@ function writeSessionMap(sessionMap: SessionMap) {
 
 const telegramSessions = readSessionMap()
 
+async function createTelegramSession(chatId: string): Promise<string | undefined> {
+  const session = await client.session.create({
+    body: { title: `Telegram chat ${chatId}` },
+  })
+
+  if (!session.data) {
+    return undefined
+  }
+
+  telegramSessions[chatId] = session.data.id
+  writeSessionMap(telegramSessions)
+  log("INFO", `Created new persistent session ${session.data.id} for chat ${chatId}`)
+
+  return session.data.id
+}
+
 // --- Telegram Bot ---
 
 log("INFO", "Starting Bruce...")
@@ -187,24 +203,31 @@ bot.on("message:text", async (ctx) => {
   log("INFO", `Received: ${text.slice(0, 80)}${text.length > 80 ? "..." : ""}`)
 
   try {
-    let sessionId = telegramSessions[chatId]
+    if (text === "/new") {
+      const sessionId = await createTelegramSession(chatId)
 
-    if (!sessionId) {
-      const session = await client.session.create({
-        body: { title: `Telegram chat ${chatId}` },
-      })
-
-      if (!session.data) {
-        const msg = "Failed to start a session. Something's cooked."
+      if (!sessionId) {
+        const msg = "Failed to start a fresh session. Something's cooked."
         log("ERROR", msg)
         await ctx.reply(msg)
         return
       }
 
-      sessionId = session.data.id
-      telegramSessions[chatId] = sessionId
-      writeSessionMap(telegramSessions)
-      log("INFO", `Created new persistent session ${sessionId} for chat ${chatId}`)
+      await ctx.reply("Righto, started a new thread. Clean slate from here.")
+      return
+    }
+
+    let sessionId = telegramSessions[chatId]
+
+    if (!sessionId) {
+      sessionId = await createTelegramSession(chatId)
+
+      if (!sessionId) {
+        const msg = "Failed to start a session. Something's cooked."
+        log("ERROR", msg)
+        await ctx.reply(msg)
+        return
+      }
     } else {
       log("INFO", `Reusing persistent session ${sessionId} for chat ${chatId}`)
     }
