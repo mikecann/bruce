@@ -23,7 +23,7 @@ const bot = new Bot(BOT_TOKEN)
 
 // --- OpenCode ---
 
-const { client } = await createOpencode()
+const { client } = await createOpencode({ port: 4097 })
 
 // --- Message handling ---
 
