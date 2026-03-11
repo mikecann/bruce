@@ -88,14 +88,14 @@ function formatDuration(ms: number): string {
 
 process.on("uncaughtException", async (err) => {
   log("ERROR", "Uncaught exception — process will exit", err)
-  await alertMike(`⚠️ Bruce crashed (uncaught exception):\n${err.message}\n\nCheck logs/bruce.log for the full trace.`)
+  await alertMike(`⚠️ Bruce crashed (uncaught exception):\n${err.message}\n\nAsk Bruce to inspect his logs and explain what happened.`)
   process.exit(1)
 })
 
 process.on("unhandledRejection", async (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason))
   log("ERROR", "Unhandled promise rejection", err)
-  await alertMike(`⚠️ Bruce hit an unhandled error:\n${err.message}\n\nCheck logs/bruce.log for the full trace.`)
+  await alertMike(`⚠️ Bruce hit an unhandled error:\n${err.message}\n\nAsk Bruce to inspect his logs and explain what happened.`)
 })
 
 // --- State helpers ---
@@ -290,7 +290,7 @@ bot.on("message:text", async (ctx) => {
       }
 
       await ctx.reply(
-        `I got stuck on that one and aborted the run after ${formatDuration(TURN_TIMEOUT_MS)}. Check logs/bruce.log if you want the gory details.`,
+        `I got stuck on that one and aborted the run after ${formatDuration(TURN_TIMEOUT_MS)}. Send me something like "have a look at the logs and tell me what happened" and I'll inspect my logs for you.`,
       ).catch(() => {})
     }, TURN_TIMEOUT_MS)
 
@@ -376,8 +376,8 @@ bot.on("message:text", async (ctx) => {
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err))
     log("ERROR", "Error handling message", error)
-    await ctx.reply("Something went wrong on my end. Check logs/bruce.log for details.").catch(() => {})
-    await alertMike(`⚠️ Error handling your message:\n${error.message}\n\nCheck logs/bruce.log`)
+    await ctx.reply("Something went wrong on my end. Ask me to inspect my logs and I'll tell you what happened.").catch(() => {})
+    await alertMike(`⚠️ Error handling your message:\n${error.message}\n\nAsk Bruce to inspect his logs and explain what happened.`)
   }
 })
 
