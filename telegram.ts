@@ -297,6 +297,24 @@ bot.on("message:text", async (ctx) => {
 
     const eventLoop = (async () => {
       for await (const event of events.stream) {
+        const maybePermissionEvent = event as {
+          type?: string
+          properties?: {
+            permission?: string
+            patterns?: string[]
+          }
+        }
+
+        if (maybePermissionEvent.type === "permission.asked") {
+          const permission = maybePermissionEvent.properties?.permission ?? "unknown"
+          const patterns = Array.isArray(maybePermissionEvent.properties?.patterns)
+            ? maybePermissionEvent.properties?.patterns.join(", ")
+            : "unknown"
+          const blocker = `OpenCode asked for permission '${permission}' on ${patterns}. That's a blocker, so something in the permission config is still cooked.`
+          log("ERROR", blocker, maybePermissionEvent.properties)
+          await ctx.reply(`I hit a permission gate: ${permission} on ${patterns}. I shouldn't be getting blocked here.`).catch(() => {})
+        }
+
         if (event.type === "message.part.updated") {
           const part = event.properties?.part
           if (part?.type === "text" && !part?.synthetic) {
