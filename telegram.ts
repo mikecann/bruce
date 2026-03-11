@@ -16,6 +16,8 @@ const LOGS_DIR = join(BASE_DIR, "logs")
 const SHUTDOWN_STATE_FILE = join(STATE_DIR, "shutdown-reason.json")
 const SESSION_MAP_FILE = join(STATE_DIR, "telegram-sessions.json")
 const LOG_FILE = join(LOGS_DIR, "bruce.log")
+const TURN_TIMEOUT_MS = 5 * 60 * 1000
+const PROGRESS_INTERVAL_MS = 30 * 1000
 
 if (!BOT_TOKEN) {
   log("ERROR", "Missing TELEGRAM_BOT_TOKEN in .env")
@@ -68,6 +70,15 @@ async function alertMike(message: string) {
   } catch (err) {
     log("ERROR", "Failed to send Telegram alert (Telegram itself may be down)", err instanceof Error ? err : undefined)
   }
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+  if (remainingSeconds === 0) return `${minutes}m`
+  return `${minutes}m ${remainingSeconds}s`
 }
 
 // --- Global error handlers ---
@@ -207,6 +218,7 @@ bot.on("message:text", async (ctx) => {
   log("INFO", `Received: ${text.slice(0, 80)}${text.length > 80 ? "..." : ""}`)
 
   try {
+    const turnStartedAt = Date.now()
     if (text === "/new") {
       const sessionId = await createTelegramSession(chatId)
 
@@ -236,6 +248,8 @@ bot.on("message:text", async (ctx) => {
       log("INFO", `Reusing persistent session ${sessionId} for chat ${chatId}`)
     }
 
+    log("INFO", `Turn started for session ${sessionId}`)
+
     const events = await client.event.subscribe()
 
     let fullText = ""
@@ -246,6 +260,32 @@ bot.on("message:text", async (ctx) => {
     const typingInterval = setInterval(() => {
       ctx.replyWithChatAction("typing").catch(() => {})
     }, 4000)
+
+    const progressInterval = setInterval(() => {
+      const elapsed = Date.now() - turnStartedAt
+      const update = `Still working on it - been at it for ${formatDuration(elapsed)}.`
+      log("INFO", `Progress update for session ${sessionId}: ${update}`)
+      ctx.reply(update).catch((err) => {
+        log("ERROR", "Failed to send progress update", err instanceof Error ? err : undefined)
+      })
+    }, PROGRESS_INTERVAL_MS)
+
+    let timedOut = false
+    const timeoutHandle = setTimeout(async () => {
+      timedOut = true
+      log("ERROR", `Turn timed out after ${formatDuration(TURN_TIMEOUT_MS)} for session ${sessionId}`)
+
+      try {
+        await client.session.abort({ path: { id: sessionId } })
+        log("WARN", `Aborted stuck session ${sessionId}`)
+      } catch (err) {
+        log("ERROR", `Failed to abort stuck session ${sessionId}`, err instanceof Error ? err : undefined)
+      }
+
+      await ctx.reply(
+        `I got stuck on that one and aborted the run after ${formatDuration(TURN_TIMEOUT_MS)}. Check logs/bruce.log if you want the gory details.`,
+      ).catch(() => {})
+    }, TURN_TIMEOUT_MS)
 
     const eventLoop = (async () => {
       for await (const event of events.stream) {
@@ -290,6 +330,12 @@ bot.on("message:text", async (ctx) => {
 
     await eventLoop
     clearInterval(typingInterval)
+    clearInterval(progressInterval)
+    clearTimeout(timeoutHandle)
+
+    if (timedOut) {
+      return
+    }
 
     if (fullText.trim()) {
       const chunks = chunkMessage(fullText.trim(), 4000)
@@ -298,7 +344,7 @@ bot.on("message:text", async (ctx) => {
           await ctx.reply(chunk)
         })
       }
-      log("INFO", `Replied (${fullText.length} chars)`)
+      log("INFO", `Replied (${fullText.length} chars) after ${formatDuration(Date.now() - turnStartedAt)}`)
     } else {
       const msg = "Hmm, got nothing back. That's not right."
       log("WARN", "Session completed but response was empty")
