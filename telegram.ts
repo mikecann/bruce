@@ -1,11 +1,15 @@
 import { Bot } from "grammy"
 import { createOpencode } from "@opencode-ai/sdk"
 import { soul } from "./soul.ts"
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs"
+import { join } from "path"
 
 // --- Config ---
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const ALLOWED_CHAT_ID = process.env.TELEGRAM_CHAT_ID
+const STATE_DIR = join(import.meta.dir, "state")
+const SHUTDOWN_STATE_FILE = join(STATE_DIR, "shutdown-reason.json")
 
 if (!BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN in .env")
@@ -17,6 +21,38 @@ if (!ALLOWED_CHAT_ID) {
   process.exit(1)
 }
 
+// --- State helpers ---
+
+type ShutdownState = {
+  reason: string
+  time: string
+}
+
+function readShutdownState(): ShutdownState | null {
+  try {
+    if (!existsSync(SHUTDOWN_STATE_FILE)) return null
+    return JSON.parse(readFileSync(SHUTDOWN_STATE_FILE, "utf-8")) as ShutdownState
+  } catch {
+    return null
+  }
+}
+
+function writeShutdownState(reason: string) {
+  mkdirSync(STATE_DIR, { recursive: true })
+  writeFileSync(
+    SHUTDOWN_STATE_FILE,
+    JSON.stringify({ reason, time: new Date().toISOString() }),
+  )
+}
+
+function clearShutdownState() {
+  try {
+    if (existsSync(SHUTDOWN_STATE_FILE)) {
+      writeFileSync(SHUTDOWN_STATE_FILE, JSON.stringify({ reason: "cleared" }))
+    }
+  } catch {}
+}
+
 // --- Telegram Bot ---
 
 const bot = new Bot(BOT_TOKEN)
@@ -24,6 +60,25 @@ const bot = new Bot(BOT_TOKEN)
 // --- OpenCode ---
 
 const { client } = await createOpencode({ port: 4097 })
+
+// --- Startup notification ---
+
+const previousShutdown = readShutdownState()
+clearShutdownState()
+
+let startupMessage: string
+if (!previousShutdown || previousShutdown.reason === "cleared") {
+  startupMessage = "Back online. What do you need?"
+} else if (previousShutdown.reason === "requested-reboot") {
+  startupMessage = "I'm back after the reboot. All good."
+} else if (previousShutdown.reason === "requested-shutdown") {
+  startupMessage = "Back online. You started me back up — what's up?"
+} else {
+  startupMessage = `Back online. Went down unexpectedly (${previousShutdown.reason}). Might be worth checking what happened.`
+}
+
+await bot.api.sendMessage(ALLOWED_CHAT_ID, startupMessage)
+console.log(`Startup message sent: ${startupMessage}`)
 
 // --- Message handling ---
 
@@ -162,6 +217,10 @@ function chunkMessage(text: string, maxLen: number): string[] {
 
   return chunks
 }
+
+// --- Shutdown state writing helper (exported for Bruce's tools) ---
+
+export { writeShutdownState }
 
 // --- Start ---
 

@@ -12,6 +12,9 @@ coverage
 
 # logs
 logs
+
+# runtime state
+state
 _.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
