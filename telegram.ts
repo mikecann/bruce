@@ -2,6 +2,7 @@ import { Bot } from "grammy"
 import { createOpencode } from "@opencode-ai/sdk"
 import { cronJobs } from "./cron-config.ts"
 import { startCronJobs } from "./cron.ts"
+import { sendStartupReport, type SessionMap, type ShutdownState } from "./lib/startup.ts"
 import { soul } from "./soul.ts"
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "fs"
 import { join } from "path"
@@ -99,13 +100,6 @@ process.on("unhandledRejection", async (reason) => {
 
 // --- State helpers ---
 
-type ShutdownState = {
-  reason: string
-  time: string
-}
-
-type SessionMap = Record<string, string>
-
 function readShutdownState(): ShutdownState | null {
   try {
     if (!existsSync(SHUTDOWN_STATE_FILE)) return null
@@ -188,22 +182,16 @@ log("INFO", "Cron jobs started")
 
 // --- Startup notification ---
 
-const previousShutdown = readShutdownState()
-clearShutdownState()
-
-let startupMessage: string
-if (!previousShutdown || previousShutdown.reason === "cleared") {
-  startupMessage = "Back online. What do you need?"
-} else if (previousShutdown.reason === "requested-reboot") {
-  startupMessage = "I'm back after the reboot. All good."
-} else if (previousShutdown.reason === "requested-shutdown") {
-  startupMessage = "Back online. You started me back up — what's up?"
-} else {
-  startupMessage = `⚠️ Back online after unexpected shutdown (${previousShutdown.reason}). Might be worth checking what happened — logs are at /Users/bruce/bruce/logs/bruce.log`
-}
-
-await bot.api.sendMessage(ALLOWED_CHAT_ID, startupMessage)
-log("INFO", `Startup message sent: ${startupMessage}`)
+await sendStartupReport({
+  readShutdownState,
+  clearShutdownState,
+  readSessionMap: () => telegramSessions,
+  sendMessage: async (text) => {
+    await bot.api.sendMessage(ALLOWED_CHAT_ID, text)
+  },
+  log,
+  logFilePath: LOG_FILE,
+})
 
 // --- Message handling ---
 
@@ -263,7 +251,18 @@ bot.on("message:text", async (ctx) => {
     }, 4000)
 
     let progressInterval: ReturnType<typeof setInterval> | undefined
+    let timedOut = false
+    let finished = false
+    const cleanupTurnTimers = () => {
+      finished = true
+      clearInterval(typingInterval)
+      clearTimeout(firstProgressTimeout)
+      if (progressInterval) clearInterval(progressInterval)
+      clearTimeout(timeoutHandle)
+    }
+
     const sendProgressUpdate = () => {
+      if (finished || timedOut) return
       const elapsed = Date.now() - turnStartedAt
       const remaining = Math.max(0, TURN_TIMEOUT_MS - elapsed)
       const update = `Still working on it - been at it for ${formatDuration(elapsed)}. I'll abort in ${formatDuration(remaining)} if it doesn't finish.`
@@ -278,9 +277,9 @@ bot.on("message:text", async (ctx) => {
       progressInterval = setInterval(sendProgressUpdate, FOLLOW_UP_PROGRESS_INTERVAL_MS)
     }, FIRST_PROGRESS_DELAY_MS)
 
-    let timedOut = false
     const timeoutHandle = setTimeout(async () => {
       timedOut = true
+      cleanupTurnTimers()
       log("ERROR", `Turn timed out after ${formatDuration(TURN_TIMEOUT_MS)} for session ${sessionId}`)
 
       try {
@@ -355,10 +354,7 @@ bot.on("message:text", async (ctx) => {
     })
 
     await eventLoop
-    clearInterval(typingInterval)
-    clearTimeout(firstProgressTimeout)
-    if (progressInterval) clearInterval(progressInterval)
-    clearTimeout(timeoutHandle)
+    cleanupTurnTimers()
 
     if (timedOut) {
       return
