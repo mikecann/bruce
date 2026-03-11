@@ -17,7 +17,8 @@ const SHUTDOWN_STATE_FILE = join(STATE_DIR, "shutdown-reason.json")
 const SESSION_MAP_FILE = join(STATE_DIR, "telegram-sessions.json")
 const LOG_FILE = join(LOGS_DIR, "bruce.log")
 const TURN_TIMEOUT_MS = 5 * 60 * 1000
-const PROGRESS_INTERVAL_MS = 30 * 1000
+const FIRST_PROGRESS_DELAY_MS = 30 * 1000
+const FOLLOW_UP_PROGRESS_INTERVAL_MS = 2 * 60 * 1000
 
 if (!BOT_TOKEN) {
   log("ERROR", "Missing TELEGRAM_BOT_TOKEN in .env")
@@ -261,14 +262,21 @@ bot.on("message:text", async (ctx) => {
       ctx.replyWithChatAction("typing").catch(() => {})
     }, 4000)
 
-    const progressInterval = setInterval(() => {
+    let progressInterval: ReturnType<typeof setInterval> | undefined
+    const sendProgressUpdate = () => {
       const elapsed = Date.now() - turnStartedAt
-      const update = `Still working on it - been at it for ${formatDuration(elapsed)}.`
+      const remaining = Math.max(0, TURN_TIMEOUT_MS - elapsed)
+      const update = `Still working on it - been at it for ${formatDuration(elapsed)}. I'll abort in ${formatDuration(remaining)} if it doesn't finish.`
       log("INFO", `Progress update for session ${sessionId}: ${update}`)
       ctx.reply(update).catch((err) => {
         log("ERROR", "Failed to send progress update", err instanceof Error ? err : undefined)
       })
-    }, PROGRESS_INTERVAL_MS)
+    }
+
+    const firstProgressTimeout = setTimeout(() => {
+      sendProgressUpdate()
+      progressInterval = setInterval(sendProgressUpdate, FOLLOW_UP_PROGRESS_INTERVAL_MS)
+    }, FIRST_PROGRESS_DELAY_MS)
 
     let timedOut = false
     const timeoutHandle = setTimeout(async () => {
@@ -330,7 +338,8 @@ bot.on("message:text", async (ctx) => {
 
     await eventLoop
     clearInterval(typingInterval)
-    clearInterval(progressInterval)
+    clearTimeout(firstProgressTimeout)
+    if (progressInterval) clearInterval(progressInterval)
     clearTimeout(timeoutHandle)
 
     if (timedOut) {
