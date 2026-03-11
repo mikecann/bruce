@@ -1,7 +1,6 @@
 import { createOpencode } from "@opencode-ai/sdk"
+import { cronJobs } from "./cron-config.ts"
 import { startCronJobs } from "./cron.ts"
-import { cronJobs } from "./cron-jobs.ts"
-import { formatMemoryForPrompt, loadMemory } from "./memory.ts"
 import { soul } from "./soul.ts"
 
 const prompt = process.argv.slice(2).join(" ")
@@ -14,11 +13,6 @@ if (!prompt) {
 
 const { client } = await createOpencode()
 startCronJobs(cronJobs, { client, log: () => {} })
-
-function buildSystemPrompt() {
-  const memory = formatMemoryForPrompt(loadMemory().entries)
-  return memory ? `${soul}\n\n${memory}` : soul
-}
 
 // Create a new session
 const session = await client.session.create({
@@ -72,7 +66,7 @@ const eventLoop = (async () => {
 await client.session.prompt({
   path: { id: sessionId },
   body: {
-    system: buildSystemPrompt(),
+    system: soul,
     parts: [{ type: "text", text: prompt }],
   },
 })
