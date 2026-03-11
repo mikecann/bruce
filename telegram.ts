@@ -12,6 +12,7 @@ const BASE_DIR = import.meta.dir
 const STATE_DIR = join(BASE_DIR, "state")
 const LOGS_DIR = join(BASE_DIR, "logs")
 const SHUTDOWN_STATE_FILE = join(STATE_DIR, "shutdown-reason.json")
+const SESSION_MAP_FILE = join(STATE_DIR, "telegram-sessions.json")
 const LOG_FILE = join(LOGS_DIR, "bruce.log")
 
 if (!BOT_TOKEN) {
@@ -89,6 +90,8 @@ type ShutdownState = {
   time: string
 }
 
+type SessionMap = Record<string, string>
+
 function readShutdownState(): ShutdownState | null {
   try {
     if (!existsSync(SHUTDOWN_STATE_FILE)) return null
@@ -117,6 +120,26 @@ function clearShutdownState() {
     }
   } catch {}
 }
+
+function readSessionMap(): SessionMap {
+  try {
+    if (!existsSync(SESSION_MAP_FILE)) return {}
+    return JSON.parse(readFileSync(SESSION_MAP_FILE, "utf-8")) as SessionMap
+  } catch {
+    return {}
+  }
+}
+
+function writeSessionMap(sessionMap: SessionMap) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true })
+    writeFileSync(SESSION_MAP_FILE, JSON.stringify(sessionMap, null, 2))
+  } catch (err) {
+    log("ERROR", "Failed to write Telegram session map", err instanceof Error ? err : undefined)
+  }
+}
+
+const telegramSessions = readSessionMap()
 
 // --- Telegram Bot ---
 
@@ -164,19 +187,27 @@ bot.on("message:text", async (ctx) => {
   log("INFO", `Received: ${text.slice(0, 80)}${text.length > 80 ? "..." : ""}`)
 
   try {
-    const session = await client.session.create({
-      body: { title: text.slice(0, 60) },
-    })
+    let sessionId = telegramSessions[chatId]
 
-    if (!session.data) {
-      const msg = "Failed to start a session. Something's cooked."
-      log("ERROR", msg)
-      await ctx.reply(msg)
-      return
+    if (!sessionId) {
+      const session = await client.session.create({
+        body: { title: `Telegram chat ${chatId}` },
+      })
+
+      if (!session.data) {
+        const msg = "Failed to start a session. Something's cooked."
+        log("ERROR", msg)
+        await ctx.reply(msg)
+        return
+      }
+
+      sessionId = session.data.id
+      telegramSessions[chatId] = sessionId
+      writeSessionMap(telegramSessions)
+      log("INFO", `Created new persistent session ${sessionId} for chat ${chatId}`)
+    } else {
+      log("INFO", `Reusing persistent session ${sessionId} for chat ${chatId}`)
     }
-
-    const sessionId = session.data.id
-    log("INFO", `Session created: ${sessionId}`)
 
     const events = await client.event.subscribe()
 
