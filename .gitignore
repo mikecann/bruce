@@ -10,11 +10,13 @@ dist
 coverage
 *.lcov
 
-# logs
-logs
+# logs (keep the dir, ignore the files)
+logs/*
+!logs/.gitkeep
 
-# runtime state
-state
+# runtime state (keep the dir, ignore the files)
+state/*
+!state/.gitkeep
 _.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 

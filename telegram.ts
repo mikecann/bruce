@@ -1,25 +1,86 @@
 import { Bot } from "grammy"
 import { createOpencode } from "@opencode-ai/sdk"
 import { soul } from "./soul.ts"
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs"
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "fs"
 import { join } from "path"
 
 // --- Config ---
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const ALLOWED_CHAT_ID = process.env.TELEGRAM_CHAT_ID
-const STATE_DIR = join(import.meta.dir, "state")
+const BASE_DIR = import.meta.dir
+const STATE_DIR = join(BASE_DIR, "state")
+const LOGS_DIR = join(BASE_DIR, "logs")
 const SHUTDOWN_STATE_FILE = join(STATE_DIR, "shutdown-reason.json")
+const LOG_FILE = join(LOGS_DIR, "bruce.log")
 
 if (!BOT_TOKEN) {
-  console.error("Missing TELEGRAM_BOT_TOKEN in .env")
+  log("ERROR", "Missing TELEGRAM_BOT_TOKEN in .env")
   process.exit(1)
 }
 
 if (!ALLOWED_CHAT_ID) {
-  console.error("Missing TELEGRAM_CHAT_ID in .env")
+  log("ERROR", "Missing TELEGRAM_CHAT_ID in .env")
   process.exit(1)
 }
+
+// --- Logger ---
+// Writes timestamped entries to logs/bruce.log AND to stdout.
+// Safe to call before the bot is initialised — Telegram alerts are best-effort.
+
+function log(level: "INFO" | "ERROR" | "WARN", message: string, extra?: unknown) {
+  const timestamp = new Date().toISOString()
+  const extraStr = extra !== undefined
+    ? " " + (extra instanceof Error
+        ? `${extra.message}\n${extra.stack}`
+        : JSON.stringify(extra))
+    : ""
+  const line = `[${timestamp}] [${level}] ${message}${extraStr}`
+
+  // Always write to stdout (captured by launchd → logs/telegram.stdout.log)
+  console.log(line)
+
+  // Also append to the rolling log file
+  try {
+    mkdirSync(LOGS_DIR, { recursive: true })
+    appendFileSync(LOG_FILE, line + "\n")
+  } catch {
+    // If log writing itself fails there's not much we can do
+  }
+}
+
+// --- Telegram alert helper ---
+// Best-effort: logs errors internally but never throws.
+
+let _bot: Bot | null = null
+
+async function alertMike(message: string) {
+  if (!_bot || !ALLOWED_CHAT_ID) return
+  try {
+    // Truncate to 4000 chars so a huge stack trace doesn't blow up the API call
+    const truncated = message.length > 4000
+      ? message.slice(0, 3950) + "\n...[truncated]"
+      : message
+    await _bot.api.sendMessage(ALLOWED_CHAT_ID, truncated)
+  } catch (err) {
+    log("ERROR", "Failed to send Telegram alert (Telegram itself may be down)", err instanceof Error ? err : undefined)
+  }
+}
+
+// --- Global error handlers ---
+// Catch anything that escapes normal try/catch, log it, alert Mike.
+
+process.on("uncaughtException", async (err) => {
+  log("ERROR", "Uncaught exception — process will exit", err)
+  await alertMike(`⚠️ Bruce crashed (uncaught exception):\n${err.message}\n\nCheck logs/bruce.log for the full trace.`)
+  process.exit(1)
+})
+
+process.on("unhandledRejection", async (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason))
+  log("ERROR", "Unhandled promise rejection", err)
+  await alertMike(`⚠️ Bruce hit an unhandled error:\n${err.message}\n\nCheck logs/bruce.log for the full trace.`)
+})
 
 // --- State helpers ---
 
@@ -37,12 +98,16 @@ function readShutdownState(): ShutdownState | null {
   }
 }
 
-function writeShutdownState(reason: string) {
-  mkdirSync(STATE_DIR, { recursive: true })
-  writeFileSync(
-    SHUTDOWN_STATE_FILE,
-    JSON.stringify({ reason, time: new Date().toISOString() }),
-  )
+export function writeShutdownState(reason: string) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true })
+    writeFileSync(
+      SHUTDOWN_STATE_FILE,
+      JSON.stringify({ reason, time: new Date().toISOString() }),
+    )
+  } catch (err) {
+    log("ERROR", "Failed to write shutdown state", err instanceof Error ? err : undefined)
+  }
 }
 
 function clearShutdownState() {
@@ -55,11 +120,16 @@ function clearShutdownState() {
 
 // --- Telegram Bot ---
 
+log("INFO", "Starting Bruce...")
+
 const bot = new Bot(BOT_TOKEN)
+_bot = bot
 
 // --- OpenCode ---
 
+log("INFO", "Starting OpenCode server on port 4097...")
 const { client } = await createOpencode({ port: 4097 })
+log("INFO", "OpenCode server ready")
 
 // --- Startup notification ---
 
@@ -74,50 +144,47 @@ if (!previousShutdown || previousShutdown.reason === "cleared") {
 } else if (previousShutdown.reason === "requested-shutdown") {
   startupMessage = "Back online. You started me back up — what's up?"
 } else {
-  startupMessage = `Back online. Went down unexpectedly (${previousShutdown.reason}). Might be worth checking what happened.`
+  startupMessage = `⚠️ Back online after unexpected shutdown (${previousShutdown.reason}). Might be worth checking what happened — logs are at /Users/bruce/bruce/logs/bruce.log`
 }
 
 await bot.api.sendMessage(ALLOWED_CHAT_ID, startupMessage)
-console.log(`Startup message sent: ${startupMessage}`)
+log("INFO", `Startup message sent: ${startupMessage}`)
 
 // --- Message handling ---
 
 bot.on("message:text", async (ctx) => {
   const chatId = String(ctx.chat.id)
 
-  // Only respond to Mike
   if (chatId !== ALLOWED_CHAT_ID) {
-    console.log(`Ignoring message from unknown chat: ${chatId}`)
+    log("WARN", `Ignoring message from unknown chat: ${chatId}`)
     return
   }
 
   const text = ctx.message.text
-  console.log(`Received: ${text.slice(0, 80)}${text.length > 80 ? "..." : ""}`)
+  log("INFO", `Received: ${text.slice(0, 80)}${text.length > 80 ? "..." : ""}`)
 
   try {
-    // Create an OpenCode session
     const session = await client.session.create({
       body: { title: text.slice(0, 60) },
     })
 
     if (!session.data) {
-      await ctx.reply("Failed to start a session. Something's cooked.")
+      const msg = "Failed to start a session. Something's cooked."
+      log("ERROR", msg)
+      await ctx.reply(msg)
       return
     }
 
     const sessionId = session.data.id
+    log("INFO", `Session created: ${sessionId}`)
 
-    // Subscribe to events
     const events = await client.event.subscribe()
 
-    // Collect the full response text
     let fullText = ""
     let lastText = ""
 
-    // Send a typing indicator
     await ctx.replyWithChatAction("typing")
 
-    // Keep typing indicator alive while processing
     const typingInterval = setInterval(() => {
       ctx.replyWithChatAction("typing").catch(() => {})
     }, 4000)
@@ -143,16 +210,18 @@ bot.on("message:text", async (ctx) => {
           }
         }
 
-        if (
-          event.type === "session.error" ||
-          event.type === "server.instance.disposed"
-        ) {
+        if (event.type === "session.error") {
+          log("ERROR", `Session error for ${sessionId}`, event.properties?.error)
+          break
+        }
+
+        if (event.type === "server.instance.disposed") {
+          log("WARN", "OpenCode server instance disposed")
           break
         }
       }
     })()
 
-    // Send the prompt with Bruce's soul
     await client.session.prompt({
       path: { id: sessionId },
       body: {
@@ -161,28 +230,27 @@ bot.on("message:text", async (ctx) => {
       },
     })
 
-    // Wait for completion
     await eventLoop
     clearInterval(typingInterval)
 
-    // Send the response
     if (fullText.trim()) {
-      // Telegram has a 4096 char limit per message — chunk if needed
       const chunks = chunkMessage(fullText.trim(), 4000)
       for (const chunk of chunks) {
         await ctx.reply(chunk, { parse_mode: "Markdown" }).catch(async () => {
-          // Fall back to plain text if Markdown parsing fails
           await ctx.reply(chunk)
         })
       }
+      log("INFO", `Replied (${fullText.length} chars)`)
     } else {
-      await ctx.reply("Hmm, got nothing back. That's not right.")
+      const msg = "Hmm, got nothing back. That's not right."
+      log("WARN", "Session completed but response was empty")
+      await ctx.reply(msg)
     }
-
-    console.log(`Replied (${fullText.length} chars)`)
   } catch (err) {
-    console.error("Error handling message:", err)
-    await ctx.reply("Something went wrong on my end. Give me a sec.").catch(() => {})
+    const error = err instanceof Error ? err : new Error(String(err))
+    log("ERROR", "Error handling message", error)
+    await ctx.reply("Something went wrong on my end. Check logs/bruce.log for details.").catch(() => {})
+    await alertMike(`⚠️ Error handling your message:\n${error.message}\n\nCheck logs/bruce.log`)
   }
 })
 
@@ -200,16 +268,9 @@ function chunkMessage(text: string, maxLen: number): string[] {
       break
     }
 
-    // Try to split at a newline near the limit
     let splitAt = remaining.lastIndexOf("\n", maxLen)
-    if (splitAt < maxLen * 0.5) {
-      // No good newline break — split at a space
-      splitAt = remaining.lastIndexOf(" ", maxLen)
-    }
-    if (splitAt < maxLen * 0.5) {
-      // No good break at all — hard split
-      splitAt = maxLen
-    }
+    if (splitAt < maxLen * 0.5) splitAt = remaining.lastIndexOf(" ", maxLen)
+    if (splitAt < maxLen * 0.5) splitAt = maxLen
 
     chunks.push(remaining.slice(0, splitAt))
     remaining = remaining.slice(splitAt).trimStart()
@@ -218,11 +279,7 @@ function chunkMessage(text: string, maxLen: number): string[] {
   return chunks
 }
 
-// --- Shutdown state writing helper (exported for Bruce's tools) ---
-
-export { writeShutdownState }
-
 // --- Start ---
 
-console.log("Bruce is listening on Telegram...")
+log("INFO", "Bruce is listening on Telegram...")
 bot.start()
