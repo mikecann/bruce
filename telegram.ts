@@ -1,5 +1,8 @@
 import { Bot } from "grammy"
 import { createOpencode } from "@opencode-ai/sdk"
+import { startCronJobs } from "./cron.ts"
+import { cronJobs } from "./cron-jobs.ts"
+import { formatMemoryForPrompt, loadMemory } from "./memory.ts"
 import { soul } from "./soul.ts"
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "fs"
 import { join } from "path"
@@ -157,6 +160,11 @@ async function createTelegramSession(chatId: string): Promise<string | undefined
   return session.data.id
 }
 
+function buildSystemPrompt() {
+  const memory = formatMemoryForPrompt(loadMemory().entries)
+  return memory ? `${soul}\n\n${memory}` : soul
+}
+
 // --- Telegram Bot ---
 
 log("INFO", "Starting Bruce...")
@@ -169,6 +177,8 @@ _bot = bot
 log("INFO", "Starting OpenCode server on port 4097...")
 const { client } = await createOpencode({ port: 4097 })
 log("INFO", "OpenCode server ready")
+startCronJobs(cronJobs, { client, log })
+log("INFO", "Cron jobs started")
 
 // --- Startup notification ---
 
@@ -279,7 +289,7 @@ bot.on("message:text", async (ctx) => {
     await client.session.prompt({
       path: { id: sessionId },
       body: {
-        system: soul,
+        system: buildSystemPrompt(),
         parts: [{ type: "text", text }],
       },
     })
