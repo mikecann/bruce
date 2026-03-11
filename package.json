@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "bruce": "bun run index.ts",
+    "telegram": "bun run telegram.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -14,6 +15,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^1.2.24"
+    "@opencode-ai/sdk": "^1.2.24",
+    "grammy": "^1.41.1"
   }
 }
